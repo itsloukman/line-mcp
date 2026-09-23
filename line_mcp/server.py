@@ -1,0 +1,90 @@
+"""MCP server exposing a personal LINE account.
+
+Transport: stdio. Run with `line-mcp serve` (or `python -m line_mcp serve`).
+Requires a prior `line-mcp login` (QR scan on your phone).
+"""
+
+from __future__ import annotations
+
+from mcp.server.fastmcp import FastMCP
+
+from . import client as C
+
+mcp = FastMCP(
+    "line-personal",
+    instructions=(
+        "Unofficial bridge to the user's personal LINE account (companion device; "
+        "the phone stays logged in). Chats are addressed by chat_id from line_chats. "
+        "Messages are E2EE-decrypted when possible. Sending messages acts as the user: "
+        "only send when the user explicitly approved the exact message."
+    ),
+)
+
+
+def _api():
+    return C.load_api()
+
+
+def _my_mid(api) -> str | None:
+    try:
+        return api.get_profile().get("mid")
+    except Exception:
+        return None
+
+
+@mcp.tool()
+def line_whoami() -> dict:
+    """Return the logged-in LINE profile (mid, display name)."""
+    api = _api()
+    p = api.get_profile()
+    return {"mid": p.get("mid"), "displayName": p.get("displayName")}
+
+
+@mcp.tool()
+def line_chats(limit: int = 30) -> list[dict]:
+    """List recent chats: chat_id, resolved name, unread count. Use chat_id with line_read/line_send."""
+    return C.chats_to_list(_api(), limit=limit)
+
+
+@mcp.tool()
+def line_read(chat_id: str, count: int = 20) -> list[dict]:
+    """Read recent messages from a chat (E2EE-decrypted). Oldest first."""
+    api = _api()
+    my_mid = _my_mid(api)
+    msgs = api.get_recent_messages(chat_id, count) or []
+    return [
+        C.message_to_dict(api, my_mid, m)
+        for m in reversed(msgs)
+        if isinstance(m, dict)
+    ]
+
+
+@mcp.tool()
+def line_send(chat_id: str, text: str) -> dict:
+    """Send a text message to a chat as the user. Only call with the user's explicit approval of the exact text."""
+    api = _api()
+    return {"result": api.send_text(chat_id, text)}
+
+
+@mcp.tool()
+def line_find_contact(name: str) -> list[dict]:
+    """Find contacts by display-name substring. Returns mid + displayName (mid doubles as chat_id for DMs)."""
+    api = _api()
+    contacts, _ = C._name_cache()
+    needle = name.lower()
+    return [
+        {"mid": mid, "displayName": dn}
+        for mid, dn in contacts.items()
+        if needle in dn.lower()
+    ]
+
+
+@mcp.tool()
+def line_groups() -> list[dict]:
+    """List LINE groups: id (chat_id) and name."""
+    from .client import _unwrap_groups
+
+    return [
+        {"chat_id": gid, "name": name}
+        for gid, name in _unwrap_groups(_api()).items()
+    ]
