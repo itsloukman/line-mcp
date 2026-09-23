@@ -64,8 +64,10 @@ Muse (`~/.claude.json` or project `.mcp.json`):
 |---|---|
 | `line_whoami` | Logged-in profile (mid, display name) |
 | `line_chats(limit?)` | Recent chats: `chat_id`, resolved name, unread count |
-| `line_read(chat_id, count?)` | Recent messages, E2EE-decrypted, oldest first |
+| `line_read(chat_id, count?)` | Recent messages, E2EE-decrypted, oldest first (images flagged with `has_image`) |
 | `line_send(chat_id, text)` | Send a text message **as you** — only with explicit approval |
+| `line_get_image(message_id)` | Download an image message — returns the image itself |
+| `line_send_image(chat_id, image_path)` | Send an image file **as you** — only with explicit approval |
 | `line_find_contact(name)` | Find contacts by name (mid doubles as DM `chat_id`) |
 | `line_groups()` | Groups: id + name |
 

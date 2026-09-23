@@ -94,14 +94,37 @@ def decrypt_text(api: OkLine, m: dict) -> str:
 
 def message_to_dict(api: OkLine, my_mid: str | None, m: dict) -> dict:
     ts = m.get("createdTime")
+    ctype = m.get("contentType")
+    text = decrypt_text(api, m)
+    if ctype == 1 and not text:
+        text = "[image]"
     return {
         "id": m.get("id"),
         "from": m.get("from"),
         "from_me": bool(my_mid) and m.get("from") == my_mid,
-        "type": m.get("contentType"),
-        "text": decrypt_text(api, m),
+        "type": ctype,
+        "text": text,
+        "has_image": ctype == 1,
         "created_ms": ts,
     }
+
+
+def sniff_mime(data: bytes) -> str:
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return "application/octet-stream"
+
+
+def download_image(api: OkLine, message_id: str) -> tuple[bytes, str]:
+    """Download an image message's bytes. Returns (bytes, mime)."""
+    data = api.obs.download_object("talk", "m", message_id)
+    return bytes(data), sniff_mime(bytes(data))
 
 
 def chats_to_list(api: OkLine, limit: int = 30) -> list[dict]:

@@ -7,6 +7,7 @@ Requires a prior `line-mcp login` (QR scan on your phone).
 from __future__ import annotations
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ImageContent
 
 from . import client as C
 
@@ -48,7 +49,7 @@ def line_chats(limit: int = 30) -> list[dict]:
 
 @mcp.tool()
 def line_read(chat_id: str, count: int = 20) -> list[dict]:
-    """Read recent messages from a chat (E2EE-decrypted). Oldest first."""
+    """Read recent messages from a chat (E2EE-decrypted). Oldest first. Image messages come back with has_image=true and text "[image]" — fetch the bytes with line_get_image(message_id)."""
     api = _api()
     my_mid = _my_mid(api)
     msgs = api.get_recent_messages(chat_id, count) or []
@@ -64,6 +65,27 @@ def line_send(chat_id: str, text: str) -> dict:
     """Send a text message to a chat as the user. Only call with the user's explicit approval of the exact text."""
     api = _api()
     return {"result": api.send_text(chat_id, text)}
+
+
+@mcp.tool()
+def line_get_image(message_id: str):
+    """Download an image message's bytes and return the image itself. Get message_id from line_read (messages with has_image=true)."""
+    import base64
+
+    api = _api()
+    data, mime = C.download_image(api, message_id)
+    return ImageContent(
+        type="image", data=base64.b64encode(data).decode("ascii"), mimeType=mime
+    )
+
+
+@mcp.tool()
+def line_send_image(chat_id: str, image_path: str) -> dict:
+    """Send an image file to a chat as the user. image_path is a local file path on the machine running the server. Only call with the user's explicit approval."""
+    api = _api()
+    with open(image_path, "rb") as f:
+        data = f.read()
+    return {"result": api.send_image(chat_id, data)}
 
 
 @mcp.tool()
