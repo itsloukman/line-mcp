@@ -111,7 +111,7 @@ Read tools are annotated `readOnlyHint`; tools that act as you are annotated as 
 
 ## Local message store & live sync
 
-`line-mcp serve` keeps every message it sees in `~/.line-mcp/messages.db`: everything you read, sync or search, plus everything that arrives while it runs. It subscribes to LINE's operation stream, exactly like the Chrome extension does, so new messages and unsends are picked up in real time. The last processed revision is saved, so after a restart it catches up on what arrived while it was down.
+`line-mcp serve` keeps every message it sees in `~/.line-mcp/messages.db`: everything you read, sync or search, plus everything that arrives while it runs. It subscribes to LINE's operation stream, exactly like the Chrome extension does, so new messages and unsends are picked up in real time. The last processed revision is saved, so after a restart it catches up on what arrived while it was down. LINE doesn't stream every message to a companion device (for example, messages you send from your phone), so the server also checks once a minute for chats whose latest message it hasn't seen yet. That costs one or two API calls; set the interval with `LINE_MCP_POLL_SECONDS`.
 
 This powers full search, `line_new_messages` and `line_wait_for_message`. The database contains **decrypted message text**, so it's created mode 600 in the 700 `~/.line-mcp` directory, like the session file. Set `LINE_MCP_STORE=off` to disable it, or `LINE_MCP_DB=/path` to move it.
 

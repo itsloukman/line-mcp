@@ -155,6 +155,16 @@ class Store:
             with self._new:
                 self._new.wait(timeout=min(remaining, 5.0))
 
+    def known_ids(self, ids) -> set[str]:
+        ids = [str(i) for i in ids if i]
+        if not ids:
+            return set()
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT id FROM messages WHERE id IN ({','.join('?' * len(ids))})", ids
+            ).fetchall()
+        return {r[0] for r in rows}
+
     def get_meta(self, key: str) -> str | None:
         with self._lock:
             row = self._db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
@@ -325,16 +335,83 @@ class LiveSync(threading.Thread):
             log.warning("could not process operation %s: %s", op.type, exc)
 
 
+POLL_SECONDS = int(os.environ.get("LINE_MCP_POLL_SECONDS", "60"))
+
+
+class BoxPoller(threading.Thread):
+    """Backstop for the operation stream.
+
+    LINE doesn't deliver every message to a companion device as an operation
+    (e.g. messages you send from your phone). Once a minute, one
+    getMessageBoxes call compares each chat's last delivered message with the
+    store and fetches the chats that changed.
+    """
+
+    def __init__(self, interval: int = POLL_SECONDS) -> None:
+        super().__init__(name="line-mcp-poll", daemon=True)
+        self.interval = max(15, interval)
+        self.polls = 0
+        self.fetched = 0
+        self.error: str | None = None
+        self._stop = threading.Event()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def poll_once(self) -> int:
+        api = C.get_api()
+        store = get_store()
+        if store is None:
+            return 0
+        boxes = [b for b in C._as_list(api.get_message_boxes(limit=30)) if isinstance(b, dict) and b.get("id")]
+        me = C.my_mid(api)
+        if me and all(b["id"] != me for b in boxes):
+            # Keep Memo (your own chat) is never in the active chat list.
+            boxes += [b for b in C._as_list(api.get_message_boxes_by_ids([me])) if isinstance(b, dict) and b.get("id")]
+        latest = {}
+        for b in boxes:
+            last_id, _ = C._last_delivered(b)
+            last = [m for m in (b.get("lastMessages") or []) if isinstance(m, dict)]
+            latest[b["id"]] = str(last[0].get("id")) if last else last_id
+        known = store.known_ids(v for v in latest.values() if v)
+        new = 0
+        for chat_id, last_id in latest.items():
+            if not last_id or last_id in known:
+                continue
+            raw = [m for m in C.read_messages(api, chat_id, 20) if isinstance(m, dict)]
+            fresh = [m for m in raw if str(m.get("id")) not in store.known_ids(str(x.get("id")) for x in raw)]
+            names = C.names_for(api, {m.get("from") for m in fresh})
+            for m in reversed(fresh):  # oldest first
+                store.add(C.message_to_dict(api, me, m, names, notify=False), C.chat_of(m, me), live=True)
+                new += 1
+        self.polls += 1
+        self.fetched += new
+        return new
+
+    def run(self) -> None:
+        while not self._stop.wait(self.interval):
+            try:
+                self.poll_once()
+                self.error = None
+            except Exception as exc:
+                self.error = str(exc)[:200]
+                log.info("box poll failed: %s", exc)
+
+
 _sync: LiveSync | None = None
+_poller: BoxPoller | None = None
 
 
 def start_live_sync() -> LiveSync | None:
-    global _sync
+    global _sync, _poller
     if not enabled() or not os.path.exists(C.session_path()):
         return None
     if _sync is None or not _sync.is_alive():
         _sync = LiveSync()
         _sync.start()
+    if _poller is None or not _poller.is_alive():
+        _poller = BoxPoller()
+        _poller.start()
     return _sync
 
 
@@ -347,4 +424,6 @@ def sync_status() -> dict:
         "last_event": C._iso(int(s.last_event * 1000)) if s and s.last_event else None,
         "last_error": s.error if s else None,
         "ops_seen": s.ops_seen if s else 0,
+        "poll_every_s": _poller.interval if _poller else None,
+        "polled_new": _poller.fetched if _poller else 0,
     }

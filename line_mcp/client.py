@@ -307,6 +307,8 @@ def names_for(api: OkLine, mids) -> dict:
 
 
 def resolve_chat_name(chat_id: str) -> str:
+    if _api is not None and chat_id and chat_id == getattr(_api.tokens, "mid", None):
+        return "Keep Memo (you)"
     contacts, groups = names_or_empty()
     return contacts.get(chat_id) or groups.get(chat_id) or chat_id
 

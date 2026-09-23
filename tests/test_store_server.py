@@ -147,3 +147,27 @@ def test_expired_session_gives_login_hint(monkeypatch):
     with pytest.raises(RuntimeError, match="line_login_start"):
         boom()
     assert resets == [1]
+
+
+def test_box_poller_fetches_missed_messages_incl_keep_memo(store, monkeypatch):
+    from types import SimpleNamespace
+    from line_mcp import client as C
+
+    msgs = {
+        "uA": [{"id": "633000000000000002", "from": "uA", "to": "uME", "toType": 0, "contentType": 0, "text": "new", "createdTime": "1790000000002"},
+               {"id": "633000000000000001", "from": "uA", "to": "uME", "toType": 0, "contentType": 0, "text": "old", "createdTime": "1790000000001"}],
+        "uME": [{"id": "633000000000000003", "from": "uME", "to": "uME", "toType": 0, "contentType": 0, "text": "memo", "createdTime": "1790000000003"}],
+    }
+    api = SimpleNamespace(
+        tokens=SimpleNamespace(mid="uME"), e2ee=None, get_contacts=lambda mids: {},
+        get_message_boxes=lambda limit=30: {"messageBoxes": [{"id": "uA", "lastMessages": [msgs["uA"][0]]}]},
+        get_message_boxes_by_ids=lambda ids: {"messageBoxesByIds": {"uME": {"id": "uME", "lastDeliveredMessageId": {"messageId": "633000000000000003", "deliveredTime": "1790000000003"}}}},
+        get_recent_messages=lambda chat, n: msgs[chat][:n],
+    )
+    monkeypatch.setattr(C, "get_api", lambda: api)
+    monkeypatch.setattr(S, "get_store", lambda: store)
+    monkeypatch.setattr(C, "names_or_empty", lambda: ({}, {}))
+    store.add({"id": "633000000000000001", "text": "old", "created_ms": 1790000000001}, "uA")
+    assert S.BoxPoller().poll_once() == 2          # "new" + Keep Memo "memo"
+    assert {d["text"] for d in store.since(0, include_mine=True)} == {"old", "new", "memo"}
+    assert S.BoxPoller().poll_once() == 0          # nothing changed
