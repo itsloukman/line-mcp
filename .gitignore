@@ -4,3 +4,5 @@ __pycache__/
 .line-mcp/
 qr.png
 session.json
+dist/
+*.mcpb

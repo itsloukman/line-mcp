@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-label="line-mcp logo">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#17D86B"/>
+      <stop offset="1" stop-color="#03A148"/>
+    </linearGradient>
+    <filter id="soft" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="6" stdDeviation="8" flood-color="#014D22" flood-opacity="0.28"/>
+    </filter>
+  </defs>
+  <rect width="256" height="256" rx="60" fill="url(#bg)"/>
+  <!-- chat bubble -->
+  <g filter="url(#soft)">
+    <path d="M86 50h84c29.8 0 54 24.2 54 54v26c0 29.8-24.2 54-54 54h-47l-35 26c-4.4 3.3-10.6-.1-10.1-5.6l1.9-22.3C57.4 175.1 32 152.1 32 130v-26c0-29.8 24.2-54 54-54z" fill="#fff"/>
+  </g>
+  <!-- connected tools: a small node graph -->
+  <g stroke="#06B85A" stroke-width="9" stroke-linecap="round">
+    <line x1="92" y1="137" x2="128" y2="97"/>
+    <line x1="128" y1="97" x2="164" y2="137"/>
+    <line x1="92" y1="137" x2="164" y2="137"/>
+  </g>
+  <circle cx="128" cy="97" r="17" fill="#06B85A"/>
+  <circle cx="92" cy="137" r="17" fill="#06B85A"/>
+  <circle cx="164" cy="137" r="17" fill="#fff" stroke="#06B85A" stroke-width="9"/>
+</svg>

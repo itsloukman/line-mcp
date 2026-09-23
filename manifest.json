@@ -1,0 +1,55 @@
+{
+  "manifest_version": "0.4",
+  "name": "line-personal-mcp",
+  "display_name": "LINE (personal account)",
+  "version": "0.6.0",
+  "description": "Read, search and answer your personal LINE chats — E2EE messages and media decrypted locally.",
+  "long_description": "Unofficial MCP server for your personal LINE account. It logs in as a companion device (your phone stays logged in): after installing, ask Claude to **log you in to LINE** and scan the QR code it shows with LINE on your phone.\n\nRead and search chats (Thai/Japanese friendly), view end-to-end-encrypted photos, see who read your messages, get new messages in real time, and — only with your approval — reply, react, send files and unsend.\n\nEverything runs on your computer; the only network traffic is to LINE. **Requires Node.js 18+.** Unofficial and not affiliated with LY Corporation — use at your own risk.",
+  "author": { "name": "Loukman", "url": "https://github.com/itsloukman" },
+  "repository": { "type": "git", "url": "https://github.com/itsloukman/line-mcp.git" },
+  "homepage": "https://github.com/itsloukman/line-mcp",
+  "support": "https://github.com/itsloukman/line-mcp/issues",
+  "icon": "assets/icon.png",
+  "server": {
+    "type": "uv",
+    "entry_point": "mcpb_entry.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": ["run", "--directory", "${__dirname}", "mcpb_entry.py"],
+      "env": {
+        "LINE_NODE": "${user_config.node_path}",
+        "LINE_MCP_STORE": "${user_config.local_store}",
+        "LINE_MAX_SENDS_PER_MIN": "${user_config.max_sends_per_min}"
+      }
+    }
+  },
+  "user_config": {
+    "local_store": {
+      "type": "boolean",
+      "title": "Keep a local message store",
+      "description": "Store messages on this computer (~/.line-mcp/messages.db, private) for instant search, new-message alerts and waiting for replies.",
+      "default": true
+    },
+    "max_sends_per_min": {
+      "type": "number",
+      "title": "Max outgoing actions per minute",
+      "description": "Safety cap on sends, reactions and unsends.",
+      "default": 10,
+      "min": 1,
+      "max": 60
+    },
+    "node_path": {
+      "type": "file",
+      "title": "Node.js binary (optional)",
+      "description": "Only if Node.js isn't found automatically (Homebrew, /usr/local/bin, nvm, volta, fnm are detected).",
+      "required": false
+    }
+  },
+  "tools_generated": true,
+  "compatibility": {
+    "platforms": ["darwin", "linux", "win32"],
+    "runtimes": { "python": ">=3.10" }
+  },
+  "keywords": ["line", "messaging", "chat", "e2ee"],
+  "license": "MIT"
+}

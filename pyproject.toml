@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "line-personal-mcp"
-version = "0.5.0"
+version = "0.6.0"
 description = "Unofficial MCP server for a personal LINE account (chats, messages, send). Companion-device login via QR — your phone stays logged in."
 readme = "README.md"
 license = { text = "MIT" }

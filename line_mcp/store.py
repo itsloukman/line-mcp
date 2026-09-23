@@ -335,7 +335,7 @@ class LiveSync(threading.Thread):
             log.warning("could not process operation %s: %s", op.type, exc)
 
 
-POLL_SECONDS = int(os.environ.get("LINE_MCP_POLL_SECONDS", "60"))
+POLL_SECONDS = int(float(os.environ.get("LINE_MCP_POLL_SECONDS") or 60))
 
 
 class BoxPoller(threading.Thread):

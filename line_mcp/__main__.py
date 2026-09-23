@@ -108,6 +108,73 @@ def cmd_doctor(args) -> int:
     return 0 if ok else 1
 
 
+def cmd_install(args) -> int:
+    from . import install as I
+
+    spec = I.server_spec(use_uvx=args.uvx)
+    if args.print:
+        print(I.manual_snippet(spec))
+        return 0
+    keys = list(I.CLIENTS) if args.all else args.clients
+    if not keys:
+        found = I.detected()
+        print("Detected clients: " + (", ".join(c.key for c in found) or "none"))
+        print("Usage: line-mcp install <client> [...] | --all | --print")
+        print("Clients: " + ", ".join(I.CLIENTS))
+        return 0
+    rc = 0
+    for key in keys:
+        c = I.CLIENTS.get(key)
+        if c is None:
+            print(f"[FAIL] unknown client {key!r} (choose from: {', '.join(I.CLIENTS)})")
+            rc = 1
+            continue
+        try:
+            msg = c.install(spec, remove=args.remove)
+            print(f"[ok] {c.label}: {msg}" + ("" if args.remove else f" — {c.restart_hint}"))
+        except Exception as exc:
+            print(f"[FAIL] {c.label}: {exc}")
+            rc = 1
+    return rc
+
+
+def cmd_setup(args) -> int:
+    """Guided first run: check Node, log in, register with detected clients."""
+    from . import install as I
+    from .client import find_node, session_path
+
+    print("line-mcp setup\n")
+    node = find_node()
+    if not node:
+        print("[FAIL] Node.js 18+ is required (LINE's request signing runs in Node).")
+        print("       Install it from https://nodejs.org/ and run `line-mcp setup` again.")
+        return 1
+    print(f"[ok] Node.js: {node}")
+    if os.path.exists(session_path()):
+        print(f"[ok] Already logged in ({session_path()})")
+    else:
+        print("\nStep 1 — log in to LINE (your phone stays logged in):")
+        login_args = argparse.Namespace(timeout=600, no_terminal_qr=False)
+        if cmd_login(login_args) != 0:
+            return 1
+    found = I.detected()
+    if not found:
+        print("\nNo MCP clients detected. Add this to your client's MCP config:\n")
+        print(I.manual_snippet())
+        return 0
+    print("\nStep 2 — connect your apps:")
+    spec = I.server_spec()
+    for c in found:
+        answer = "y" if args.yes else input(f"  Add to {c.label}? [Y/n] ").strip().lower()
+        if answer in ("", "y", "yes"):
+            try:
+                print(f"  [ok] {c.install(spec)} — {c.restart_hint}")
+            except Exception as exc:
+                print(f"  [FAIL] {c.label}: {exc}")
+    print("\nDone. Try asking: \"What did I miss on LINE today?\"")
+    return 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="line-mcp", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -118,11 +185,24 @@ def main() -> None:
                        help="don't draw the QR in the terminal (image file only)")
     sub.add_parser("serve", help="Run the MCP server over stdio")
     sub.add_parser("doctor", help="Check Node.js, the session and E2EE keys")
+    setup = sub.add_parser("setup", help="Guided first run: log in and connect your MCP apps")
+    setup.add_argument("-y", "--yes", action="store_true", help="add to every detected client without asking")
+    for name, helptext in (("install", "Add line-mcp to MCP clients"), ("uninstall", "Remove line-mcp from MCP clients")):
+        p = sub.add_parser(name, help=helptext)
+        p.add_argument("clients", nargs="*", help="claude-desktop, claude-code, codex, cursor, windsurf, vscode, gemini")
+        p.add_argument("--all", action="store_true", help="every supported client")
+        p.add_argument("--uvx", action="store_true", help="launch via uvx from GitHub instead of this Python")
+        p.add_argument("--print", action="store_true", help="print a JSON config snippet instead")
     args = parser.parse_args()
     if args.command == "login":
         sys.exit(cmd_login(args))
     if args.command == "doctor":
         sys.exit(cmd_doctor(args))
+    if args.command == "setup":
+        sys.exit(cmd_setup(args))
+    if args.command in ("install", "uninstall"):
+        args.remove = args.command == "uninstall"
+        sys.exit(cmd_install(args))
     sys.exit(cmd_serve(args))
 
 

@@ -41,7 +41,7 @@ MARK = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint
 
 # Outgoing actions per minute (sends, reactions, unsends). A runaway agent loop
 # spamming as the user is the fastest way to get an unofficial client banned.
-MAX_SENDS_PER_MIN = int(os.environ.get("LINE_MAX_SENDS_PER_MIN", "10"))
+MAX_SENDS_PER_MIN = int(float(os.environ.get("LINE_MAX_SENDS_PER_MIN") or 10))
 _sends: collections.deque = collections.deque()
 _sends_lock = threading.Lock()
 
