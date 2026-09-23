@@ -229,9 +229,66 @@ def test_pagination_uses_seen_message():
         C.read_messages(api, "uA", 2, "12345")  # never seen, not in recent
 
 
-def test_e2ee_media_is_reported_not_downloaded():
+def _encrypt_like_line(plain: bytes, km_b64: str, chunked: bool = False) -> bytes:
+    import base64, hashlib, hmac
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+    k = HKDF(hashes.SHA256(), 76, salt=None, info=b"FileEncryption").derive(base64.b64decode(km_b64))
+    enc = Cipher(algorithms.AES(k[:32]), modes.CTR(k[64:76] + b"\0" * 4)).encryptor()
+    ct = enc.update(plain) + enc.finalize()
+    mac_in = b"".join(hashlib.sha256(ct[i:i + 131072]).digest() for i in range(0, len(ct), 131072)) if chunked else ct
+    return ct + hmac.new(k[32:64], mac_in, hashlib.sha256).digest()
+
+
+def test_decrypt_file_roundtrip_plain_and_chunked_mac():
+    import base64
+    km = base64.b64encode(b"k" * 32).decode()
+    jpeg = b"\xff\xd8\xff" + os.urandom(300_000)
+    assert C.decrypt_file(_encrypt_like_line(jpeg, km), km) == jpeg
+    assert C.decrypt_file(_encrypt_like_line(jpeg, km, chunked=True), km) == jpeg
+    bad = bytearray(_encrypt_like_line(jpeg, km)); bad[5] ^= 1
+    with pytest.raises(ValueError):
+        C.decrypt_file(bytes(bad), km)
+
+
+def test_talk_meta_matches_extension_encoding():
+    import base64, json
+    outer = json.loads(base64.b64decode(C.talk_meta("632886324617019823")))
+    raw = base64.b64decode(outer["message"])
+    assert raw == (b"\x0b\x00\x04\x00\x00\x00\x12" + b"632886324617019823"
+                   + b"\x0f\x00\x1b\x0c\x00\x00\x00\x00" + b"\x00")
+
+
+def test_e2ee_media_download_decrypts(monkeypatch):
+    import base64
+    km = base64.b64encode(b"m" * 32).decode()
+    jpeg = b"\xff\xd8\xff\xe0" + b"x" * 100
+    sent = {}
+
+    class Resp:
+        status_code = 200
+        content = _encrypt_like_line(jpeg, km)
+        def raise_for_status(self): pass
+
+    def _send(method, url, headers):
+        sent.update(url=url, headers=headers)
+        return Resp()
+
     api = FakeApi()
-    api.obs = SimpleNamespace(download_object=lambda *a: pytest.fail("should not download"))
+    api.config = SimpleNamespace(obs_base="https://obs", application_header="CHROMEOS\t3.7.2\tChrome_OS\t", user_agent="UA")
+    api.transport = SimpleNamespace(_send=_send)
+    api.get_encrypted_access_token = lambda ft: "ENC"
+    C._remember(msg(9, contentType=1, chunks=["x"] * 5, contentMetadata={"SID": "emi", "OID": "abc"}, _plain={"keyMaterial": km}))
+    data, mime = C.download_media(api, "9")
+    assert data == jpeg and mime == "image/jpeg"
+    assert sent["url"] == "https://obs/r/talk/emi/abc"
+    assert sent["headers"]["X-Line-Access"] == "ENC" and sent["headers"]["X-Talk-Meta"] == C.talk_meta("9")
+
+
+def test_e2ee_media_without_key_is_reported():
+    api = FakeApi(ready=False)
     C._remember(msg(9, contentType=1, chunks=["x"] * 5, contentMetadata={"SID": "emi", "OID": "abc"}))
     with pytest.raises(C.UnsupportedMedia):
         C.download_media(api, "9")
@@ -256,3 +313,42 @@ def test_find_node_prefers_env(monkeypatch):
     monkeypatch.setenv("PATH", "/nonexistent")
     found = C.find_node()
     assert found is None or os.path.isfile(found)
+
+
+def test_names_for_looks_up_non_friends_once():
+    calls = []
+
+    class Api(FakeApi):
+        def get_contacts(self, mids):
+            calls.append(list(mids))
+            if mids == ["uA", "uB"]:
+                return super().get_contacts(mids)
+            return {"contacts": {"uZ": {"contact": {"displayName": "Zoe"}}}}
+
+    C._extra_names.clear()
+    api = Api()
+    C.names_for(api, {"uZ", "uA"})
+    names = C.names_for(api, {"uZ", "uQ"})
+    assert names["uZ"] == "Zoe" and names["uA"] == "Ali (work)"
+    assert calls.count(["uZ"]) == 1  # cached after first lookup
+    C._extra_names.clear()
+
+
+def test_chat_of():
+    assert C.chat_of({"from": "uA", "to": "uME", "toType": 0}, "uME") == "uA"
+    assert C.chat_of({"from": "uME", "to": "uA", "toType": 0}, "uME") == "uA"
+    assert C.chat_of({"from": "uA", "to": "Cgroup", "toType": 2}, "uME") == "Cgroup"
+
+
+def test_read_receipts():
+    class Api(FakeApi):
+        def get_message_read_range(self, chat_ids):
+            return [{"chatId": "Cg", "ranges": {
+                "uA": [{"startMessageId": "1", "endMessageId": "100", "endTime": "1790000000000"}],
+                "uB": [{"startMessageId": "1", "endMessageId": "50", "endTime": "1780000000000"}],
+                "uME": [{"startMessageId": "1", "endMessageId": "100"}],
+            }}]
+
+    r = C.read_receipts(Api(), "Cg", "80")
+    assert r["read_by"] == ["Ali (work)"]
+    assert {x["mid"] for x in r["readers"]} == {"uA", "uB"}

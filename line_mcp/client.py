@@ -154,6 +154,15 @@ def _fix_own_message_decrypt(api: OkLine) -> None:
     e2ee = api.e2ee
     orig = e2ee._decrypt_user
     channels: dict[tuple[str, int, int], int] = {}
+    finish = e2ee._finish_decrypt
+
+    def finish_keep_payload(message: dict, pt_b64: str) -> dict:
+        # okline keeps only text/location; media needs keyMaterial too.
+        out = finish(message, pt_b64)
+        out["_plain"] = fr.deserialize_plaintext(base64.b64decode(pt_b64))
+        return out
+
+    e2ee._finish_decrypt = finish_keep_payload  # type: ignore[method-assign]
 
     def decrypt_user(message: dict) -> dict:
         me = my_mid(api)
@@ -270,6 +279,33 @@ def names_or_empty() -> tuple[dict, dict]:
         return {}, {}
 
 
+_extra_names: dict[str, str] = {}  # non-contact users (e.g. group members) -> name ("" = unknown)
+_extra_lock = threading.Lock()
+
+
+def names_for(api: OkLine, mids) -> dict:
+    """Display names for these user mids: contacts first, then a one-off
+    getContactsV2 lookup for anyone else (cached for the process)."""
+    contacts = names_or_empty()[0]
+    with _extra_lock:
+        unknown = sorted(
+            {m for m in mids if m and str(m)[:1].lower() == "u" and m not in contacts and m not in _extra_names}
+        )
+    if unknown:
+        try:
+            res = api.get_contacts(unknown)
+            ents = res.get("contacts", {}) if isinstance(res, dict) else {}
+            with _extra_lock:
+                for mid in unknown:
+                    c = (ents.get(mid) or {}).get("contact") or {}
+                    _extra_names[mid] = str(c.get("displayNameOverridden") or c.get("displayName") or "").strip()
+        except Exception as exc:
+            log.warning("sender name lookup failed: %s", exc)
+    with _extra_lock:
+        extra = {k: v for k, v in _extra_names.items() if v}
+    return {**extra, **contacts}
+
+
 def resolve_chat_name(chat_id: str) -> str:
     contacts, groups = names_or_empty()
     return contacts.get(chat_id) or groups.get(chat_id) or chat_id
@@ -333,23 +369,28 @@ def sticker_info(m: dict) -> dict | None:
 # deliveredTime and metadata from just its id.
 _seen: OrderedDict[str, dict] = OrderedDict()
 _SEEN_MAX = 3000
+_seen_lock = threading.Lock()
 
 
 def _remember(m: dict) -> None:
     mid = str(m.get("id") or "")
     if not mid:
         return
-    _seen[mid] = m
-    _seen.move_to_end(mid)
-    while len(_seen) > _SEEN_MAX:
-        _seen.popitem(last=False)
+    with _seen_lock:
+        if mid in _seen and "_plain" in _seen[mid] and "_plain" not in m:
+            return  # keep the decrypted copy
+        _seen[mid] = m
+        _seen.move_to_end(mid)
+        while len(_seen) > _SEEN_MAX:
+            _seen.popitem(last=False)
 
 
 def lookup_message(api: OkLine, message_id: str, chat_id: str | None = None) -> dict | None:
     """A raw message by id: from the seen cache, else the chat's last 200."""
     mid = str(message_id)
-    if mid in _seen:
-        return _seen[mid]
+    with _seen_lock:
+        if mid in _seen:
+            return _seen[mid]
     if chat_id:
         for m in _as_list(api.get_recent_messages(chat_id, 200)):
             if isinstance(m, dict):
@@ -365,10 +406,13 @@ def _iso(ts) -> str | None:
         return None
 
 
+# Called with (message dict, chat_id) for every converted message (the store).
+message_hooks: list = []
+
+
 def message_to_dict(
-    api: OkLine, my_mid: str | None, m: dict, names: dict | None = None
+    api: OkLine, my_mid: str | None, m: dict, names: dict | None = None, *, notify: bool = True
 ) -> dict:
-    _remember(m)
     ts = m.get("createdTime")
     ctype = m.get("contentType")
     try:
@@ -376,6 +420,7 @@ def message_to_dict(
     except (TypeError, ValueError):
         pass
     d, ok = decrypt(api, m)
+    _remember(d if ok else m)
     text = (d.get("text") or "") if ok else UNDECRYPTABLE
     meta = m.get("contentMetadata") or {}
     sender = m.get("from")
@@ -407,14 +452,21 @@ def message_to_dict(
         out["location"] = {
             k: loc.get(k) for k in ("title", "address", "latitude", "longitude") if loc.get(k)
         }
+    if notify and message_hooks:
+        chat_id = chat_of(m, my_mid)
+        for hook in message_hooks:
+            try:
+                hook(out, chat_id)
+            except Exception as exc:
+                log.warning("message hook failed: %s", exc)
     return out
 
 
 def messages_to_dicts(api: OkLine, msgs: list, *, oldest_first: bool = True) -> list[dict]:
     """Convert a raw (newest-first) message list, resolving sender names once."""
     me = my_mid(api)
-    names = names_or_empty()[0]
     items = [m for m in (msgs or []) if isinstance(m, dict)]
+    names = names_for(api, {m.get("from") for m in items})
     if oldest_first:
         items = list(reversed(items))
     return [message_to_dict(api, me, m, names) for m in items]
@@ -509,17 +561,110 @@ class UnsupportedMedia(RuntimeError):
     pass
 
 
+def talk_meta(message_id: str) -> str:
+    """X-Talk-Meta header for E2EE media downloads (as the Chrome extension
+    builds it): base64(JSON{"message": base64(Thrift-binary Message{4: id,
+    27: []})})."""
+    import json
+    import struct
+
+    b = str(message_id).encode()
+    thrift = (
+        b"\x0b" + struct.pack(">hi", 4, len(b)) + b  # field 4 (id): string
+        + b"\x0f" + struct.pack(">h", 27) + b"\x0c" + struct.pack(">i", 0)  # field 27: empty list<struct>
+        + b"\x00"  # STOP
+    )
+    inner = base64.b64encode(thrift).decode()
+    return base64.b64encode(json.dumps({"message": inner}, separators=(",", ":")).encode()).decode()
+
+
+_CHUNK = 131072  # the extension hashes large (video) payloads in 128 KiB chunks
+
+
+def decrypt_file(data: bytes, key_material_b64: str) -> bytes:
+    """Decrypt a Letter-Sealing media object.
+
+    keys = HKDF-SHA256(keyMaterial, salt="", info="FileEncryption", 76 bytes)
+    -> encKey[32] | macKey[32] | nonce[12]; payload = AES-CTR(nonce||0^4)
+    ciphertext + HMAC-SHA256(macKey, ciphertext) — or, for videos, HMAC over
+    the concatenated SHA-256 digests of 128 KiB ciphertext chunks.
+    """
+    import hashlib
+    import hmac
+
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+    keys = HKDF(hashes.SHA256(), 76, salt=None, info=b"FileEncryption").derive(
+        base64.b64decode(key_material_b64)
+    )
+    enc_key, mac_key, nonce = keys[:32], keys[32:64], keys[64:76]
+    if len(data) < 32:
+        raise ValueError("encrypted media is truncated")
+    body, sig = data[:-32], data[-32:]
+    ok = hmac.compare_digest(hmac.new(mac_key, body, hashlib.sha256).digest(), sig)
+    if not ok:
+        digests = b"".join(
+            hashlib.sha256(body[i : i + _CHUNK]).digest() for i in range(0, len(body), _CHUNK)
+        )
+        ok = hmac.compare_digest(hmac.new(mac_key, digests, hashlib.sha256).digest(), sig)
+    if not ok:
+        raise ValueError("E2EE media integrity check failed (HMAC mismatch)")
+    dec = Cipher(algorithms.AES(enc_key), modes.CTR(nonce + b"\x00" * 4)).decryptor()
+    return dec.update(body) + dec.finalize()
+
+
+def _obs_token(api: OkLine, renew: bool = False) -> str:
+    from okline.enums import EncryptedAccessTokenFeatureType
+
+    tok = getattr(api, "_line_mcp_obs_token", None)
+    if renew or not tok:
+        tok = api.get_encrypted_access_token(int(EncryptedAccessTokenFeatureType.OBS_GENERAL))
+        api._line_mcp_obs_token = tok  # type: ignore[attr-defined]
+    return tok
+
+
+def _download_e2ee(api: OkLine, m: dict) -> bytes:
+    meta = m.get("contentMetadata") or {}
+    plain = m.get("_plain")
+    if plain is None:
+        d, ok = decrypt(api, m)
+        plain = d.get("_plain") if ok else None
+        if ok:
+            _remember(d)
+    km = (plain or {}).get("keyMaterial")
+    if not km:
+        raise UnsupportedMedia(
+            f"message {m.get('id')} is end-to-end-encrypted media but its key could not be "
+            "decrypted (run `line-mcp login` again)."
+        )
+    url = f"{api.config.obs_base}/r/talk/{meta['SID']}/{meta['OID']}"
+    for renew in (False, True):
+        headers = {
+            "X-Line-Access": _obs_token(api, renew),
+            "X-Line-Application": api.config.application_header,
+            "X-Talk-Meta": talk_meta(str(m.get("id"))),
+            "User-Agent": api.config.user_agent,
+        }
+        resp = api.transport._send("GET", url, headers=headers)
+        if resp.status_code == 401 and not renew:
+            continue  # the OBS token expired; get a fresh one
+        if resp.status_code in (404, 410):
+            raise UnsupportedMedia(f"media for message {m.get('id')} is gone (expired on LINE's servers)")
+        resp.raise_for_status()
+        return decrypt_file(resp.content, km)
+    raise UnsupportedMedia(f"LINE refused the media download for message {m.get('id')}")
+
+
 def download_media(api: OkLine, message_id: str, chat_id: str | None = None) -> tuple[bytes, str]:
-    """Raw bytes + sniffed mime of a media message."""
+    """Raw bytes + sniffed mime of a media message (E2EE media is decrypted)."""
     message_id = _check_message_id(message_id)
     m = lookup_message(api, message_id, chat_id) or {}
     meta = m.get("contentMetadata") or {}
-    if meta.get("SID") == "emi" or (m.get("chunks") and meta.get("OID")):
-        raise UnsupportedMedia(
-            f"message {message_id} is end-to-end-encrypted (Letter Sealing) media; downloading "
-            "E2EE media isn't supported by the LINE Chrome protocol this server uses. "
-            "Open it in the LINE app instead."
-        )
+    if str(meta.get("SID") or "").startswith("em") and meta.get("OID"):
+        data = _download_e2ee(api, m)
+        return data, sniff_mime(data)
     import requests
 
     try:
@@ -528,8 +673,8 @@ def download_media(api: OkLine, message_id: str, chat_id: str | None = None) -> 
         status = getattr(exc.response, "status_code", None)
         if status in (401, 403, 404) and not m:
             raise UnsupportedMedia(
-                f"could not download message {message_id} (HTTP {status}). Pass chat_id so the "
-                "message can be looked up — it may be E2EE media, which isn't supported."
+                f"could not download message {message_id} (HTTP {status}). Pass the chat_id it "
+                "came from so its metadata (and E2EE key) can be looked up."
             ) from exc
         if status in (404, 410):
             raise UnsupportedMedia(f"media for message {message_id} is gone (expired on LINE's servers)") from exc
@@ -641,14 +786,13 @@ def search_messages(
     """Substring search over recent messages across the most recent chats."""
     q = query.lower()
     hits: list[dict] = []
-    names = names_or_empty()[0]
     for b in _as_list(api.get_message_boxes(limit=chat_limit)):
         chat_id = b.get("id") if isinstance(b, dict) else None
         if not chat_id:
             continue
-        for m in _as_list(api.get_recent_messages(chat_id, per_chat)):
-            if not isinstance(m, dict):
-                continue
+        msgs = [m for m in _as_list(api.get_recent_messages(chat_id, per_chat)) if isinstance(m, dict)]
+        names = names_for(api, {m.get("from") for m in msgs})
+        for m in msgs:
             d = message_to_dict(api, my_mid, m, names)
             if d["text"] and d["text"] != UNDECRYPTABLE and q in d["text"].lower():
                 d["chat_id"] = chat_id
@@ -677,7 +821,7 @@ def message_context(
     ordered = list(reversed(msgs))
     pos = len(ordered) - 1 - idx
     window = ordered[max(0, pos - before) : pos + after + 1]
-    names = names_or_empty()[0]
+    names = names_for(api, {m.get("from") for m in window})
     return {
         "target_index": min(pos, before),
         "messages": [message_to_dict(api, my_mid, m, names) for m in window],
@@ -711,3 +855,59 @@ def chats_to_list(api: OkLine, limit: int = 30) -> list[dict]:
             }
         out.append(item)
     return out
+
+
+def chat_of(m: dict, me: str | None) -> str | None:
+    """The chat (message box) a message belongs to."""
+    to, frm = m.get("to") or "", m.get("from") or ""
+    if _int(m.get("toType")) in (1, 2, 4) or to[:1].lower() in ("c", "r", "s"):
+        return to or None
+    return (to if frm == me else frm) or None
+
+
+def read_receipts(api: OkLine, chat_id: str, message_id: str | None = None) -> dict:
+    """Who has read the chat, and how far (from getMessageReadRange)."""
+    res = api.get_message_read_range([chat_id])
+    entry = next((e for e in _as_list(res) if isinstance(e, dict) and e.get("chatId") == chat_id), None)
+    ranges = (entry or {}).get("ranges") or {}
+    names = names_for(api, ranges.keys())
+    me = my_mid(api)
+    readers = []
+    for mid, spans in ranges.items():
+        if mid == me:
+            continue
+        spans = [sp for sp in spans or [] if isinstance(sp, dict)]
+        if not spans:
+            continue
+        last = max(spans, key=lambda sp: _int(sp.get("endMessageId")))
+        item = {
+            "mid": mid,
+            "name": names.get(mid),
+            "read_up_to_message_id": last.get("endMessageId"),
+            "read_up_to_time": _iso(last.get("endTime")),
+        }
+        if message_id is not None:
+            target = _int(message_id)
+            item["has_read"] = any(
+                _int(sp.get("startMessageId")) <= target <= _int(sp.get("endMessageId")) for sp in spans
+            )
+        readers.append(item)
+    out: dict = {"chat_id": chat_id, "readers": readers}
+    if message_id is not None:
+        out["message_id"] = str(message_id)
+        out["read_by"] = [r["name"] or r["mid"] for r in readers if r.get("has_read")]
+    return out
+
+
+REACTIONS = {"nice": 2, "love": 3, "fun": 4, "amazing": 5, "sad": 6, "omg": 7}
+
+
+def ingest_recent(api: OkLine, *, per_chat: int = 30, chat_limit: int = 20) -> int:
+    """Convert (and so store, via message_hooks) the recent messages of the
+    most recent chats. Returns how many messages were seen."""
+    n = 0
+    for b in _as_list(api.get_message_boxes(limit=chat_limit)):
+        chat_id = b.get("id") if isinstance(b, dict) else None
+        if chat_id:
+            n += len(messages_to_dicts(api, read_messages(api, chat_id, per_chat)))
+    return n

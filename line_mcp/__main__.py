@@ -6,37 +6,21 @@ import argparse
 import os
 import subprocess
 import sys
-import time
-
-
-def _existing_certificate() -> str | None:
-    """Device certificate from a previous login — lets LINE skip the PIN step."""
-    from .client import session_path
-
-    try:
-        from okline.session import Session
-
-        return Session.load(session_path()).certificate or None
-    except Exception:
-        return None
 
 
 def cmd_login(args) -> int:
-    import qrcode
-    from okline import OkLine
-    from okline.exceptions import LineApiError, LineTransportError
-    from okline.transport import LineConfig
     from okline.qrterm import print_qr
 
-    from .client import ensure_node_env, save_session, session_path
+    from .client import session_path
+    from .login import LoginFlow
 
-    ensure_node_env()
-    session_dir = os.path.dirname(session_path())
-    os.makedirs(session_dir, mode=0o700, exist_ok=True)
-    qr_path = os.path.join(session_dir, "qr.png")
+    qr_path = os.path.join(os.path.dirname(session_path()), "qr.png")
+    flow: LoginFlow
 
     def on_qr(url: str) -> None:
-        qrcode.make(url).save(qr_path)
+        os.makedirs(os.path.dirname(qr_path), mode=0o700, exist_ok=True)
+        with open(qr_path, "wb") as f:
+            f.write(flow.qr_png or b"")
         print("\nScan this QR with LINE on your phone (Home → QR scanner):", flush=True)
         if not args.no_terminal_qr:
             print_qr(url)
@@ -46,47 +30,29 @@ def cmd_login(args) -> int:
     def on_pin(pin: str) -> None:
         print(f"Enter this PIN on your phone when asked: {pin}", flush=True)
 
-    deadline = time.monotonic() + args.timeout
-    cert = _existing_certificate()
+    flow = LoginFlow(timeout=args.timeout, on_qr=on_qr, on_pin=on_pin)
     try:
-        while True:
-            # The gateway holds the scan/PIN long-polls open longer than okline's
-            # default 30s read timeout, so give login requests more room.
-            api = OkLine(certificate=cert, config=LineConfig(timeout=90.0))
-            try:
-                # LINE QR codes expire after a few minutes; keep offering a
-                # fresh one until the overall timeout.
-                api.qr_login(on_qr=on_qr, on_pin=on_pin, wait_seconds=180)
-                break
-            except (LineApiError, LineTransportError) as exc:
-                api.close()
-                expired = isinstance(exc, LineTransportError) or (
-                    "expired" in str(exc).lower() or exc.code == 100
-                )
-                if expired and time.monotonic() < deadline:
-                    print("QR code expired or timed out — generating a new one...", flush=True)
-                    continue
-                print(f"Login failed: {exc}", file=sys.stderr)
-                return 1
+        ok = flow.run()
     finally:
         if os.path.exists(qr_path):
             os.remove(qr_path)  # the QR is a login secret; don't leave it around
-    path = save_session(api)
-    try:
-        profile = api.get_profile()
-        print(f"Logged in as {profile.get('displayName')} ({profile.get('mid')})")
-    except Exception:
-        print("Logged in.")
-    if not api.e2ee.is_ready():
+    if not ok:
+        print(f"Login failed: {flow.error}", file=sys.stderr)
+        return 1
+    p = flow.profile or {}
+    print(f"Logged in as {p.get('displayName')} ({p.get('mid')})" if p else "Logged in.")
+    if not flow.e2ee_ready:
         print("Warning: E2EE keys were not captured; encrypted chats won't decrypt.")
-    print(f"Session saved to {path} (mode 600).")
-    api.close()
+    print(f"Session saved to {session_path()} (mode 600).")
     return 0
 
 
 def cmd_serve(args) -> int:
+    from . import store
     from .server import mcp
 
+    if store.get_store() is not None:
+        store.start_live_sync()
     mcp.run()
     return 0
 
@@ -131,6 +97,14 @@ def cmd_doctor(args) -> int:
                "Encrypted chats won't decrypt — run `line-mcp login` again.")
     except Exception as exc:
         report(False, f"LINE API call failed: {exc}", "Run `line-mcp login` again.")
+
+    from . import store
+
+    if store.enabled():
+        st = store.get_store()
+        print(f"[ok] Local message store {store.db_path()}: {st.stats()}")
+    else:
+        print("[--] Local message store disabled (LINE_MCP_STORE=off)")
     return 0 if ok else 1
 
 
