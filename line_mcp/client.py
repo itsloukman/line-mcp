@@ -92,13 +92,38 @@ def decrypt_text(api: OkLine, m: dict) -> str:
     return text
 
 
+TYPE_LABELS = {
+    0: "text",
+    1: "image",
+    2: "video",
+    3: "voice message",
+    6: "location",
+    7: "sticker",
+    13: "contact",
+    14: "file",
+    16: "audio",
+    22: "flex message",
+}
+
+
+def sticker_info(m: dict) -> dict | None:
+    meta = m.get("contentMetadata") or {}
+    pkg = meta.get("STKPKGID")
+    sid = meta.get("STKID")
+    if not pkg or not sid:
+        return None
+    return {
+        "package_id": pkg,
+        "sticker_id": sid,
+        "preview_url": f"https://stickershop.line-scdn.net/stickershop/v1/sticker/{sid}/iPhone/sticker@2x.png",
+    }
+
+
 def message_to_dict(api: OkLine, my_mid: str | None, m: dict) -> dict:
     ts = m.get("createdTime")
     ctype = m.get("contentType")
     text = decrypt_text(api, m)
-    if ctype == 1 and not text:
-        text = "[image]"
-    return {
+    out: dict = {
         "id": m.get("id"),
         "from": m.get("from"),
         "from_me": bool(my_mid) and m.get("from") == my_mid,
@@ -107,6 +132,14 @@ def message_to_dict(api: OkLine, my_mid: str | None, m: dict) -> dict:
         "has_image": ctype == 1,
         "created_ms": ts,
     }
+    if ctype == 7:
+        info = sticker_info(m)
+        out["text"] = "[sticker]" if not text else text
+        if info:
+            out["sticker"] = info
+    elif ctype and ctype != 0 and not text:
+        out["text"] = f"[{TYPE_LABELS.get(ctype, f'message type {ctype}')}]"
+    return out
 
 
 def sniff_mime(data: bytes) -> str:
@@ -125,6 +158,96 @@ def download_image(api: OkLine, message_id: str) -> tuple[bytes, str]:
     """Download an image message's bytes. Returns (bytes, mime)."""
     data = api.obs.download_object("talk", "m", message_id)
     return bytes(data), sniff_mime(bytes(data))
+
+
+def download_media_to_file(
+    api: OkLine, message_id: str, save_dir: str | None = None
+) -> dict:
+    """Download any media message (image/video/voice/file) to disk. Returns path info."""
+    import os
+
+    data = bytes(api.obs.download_object("talk", "m", message_id))
+    mime = sniff_mime(data)
+    ext = {
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+        "image/gif": ".gif",
+        "image/webp": ".webp",
+    }.get(mime, ".bin")
+    directory = save_dir or os.path.join(os.path.expanduser("~"), ".line-mcp", "media")
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, f"{message_id}{ext}")
+    with open(path, "wb") as f:
+        f.write(data)
+    return {"path": path, "mime": mime, "bytes": len(data)}
+
+
+def find_box(api: OkLine, chat_id: str) -> dict | None:
+    boxes = api.get_message_boxes(limit=200).get("messageBoxes", [])
+    for b in boxes:
+        if b.get("id") == chat_id:
+            return b
+    return None
+
+
+def box_to_dict(box: dict) -> dict:
+    last = box.get("lastMessages") or []
+    return {
+        "id": box.get("id"),
+        "kind": box.get("midType"),
+        "unread_count": box.get("unreadCount"),
+        "last_message_id": (last[0].get("id") if last else None),
+    }
+
+
+def search_messages(
+    api: OkLine,
+    my_mid: str | None,
+    query: str,
+    *,
+    per_chat: int = 40,
+    chat_limit: int = 30,
+) -> list[dict]:
+    """Substring search over recent messages across the most recent chats."""
+    q = query.lower()
+    hits: list[dict] = []
+    boxes = api.get_message_boxes(limit=chat_limit).get("messageBoxes", [])
+    for b in boxes:
+        chat_id = b.get("id")
+        msgs = api.get_recent_messages(chat_id, per_chat) or []
+        for m in msgs:
+            if not isinstance(m, dict):
+                continue
+            d = message_to_dict(api, my_mid, m)
+            if d["text"] and q in d["text"].lower():
+                d["chat_id"] = chat_id
+                hits.append(d)
+    return hits
+
+
+def message_context(
+    api: OkLine,
+    my_mid: str | None,
+    chat_id: str,
+    message_id: str,
+    *,
+    before: int = 5,
+    after: int = 5,
+) -> dict | None:
+    """Messages surrounding a given message id (reads up to 300 recent messages)."""
+    msgs = api.get_recent_messages(chat_id, 300) or []
+    msgs = [m for m in msgs if isinstance(m, dict)]
+    idx = next((i for i, m in enumerate(msgs) if str(m.get("id")) == str(message_id)), None)
+    if idx is None:
+        return None
+    # get_recent_messages is newest-first; convert to oldest-first for context
+    ordered = list(reversed(msgs))
+    pos = len(ordered) - 1 - idx
+    window = ordered[max(0, pos - before) : pos + after + 1]
+    return {
+        "target_index": min(pos, before),
+        "messages": [message_to_dict(api, my_mid, m) for m in window],
+    }
 
 
 def chats_to_list(api: OkLine, limit: int = 30) -> list[dict]:

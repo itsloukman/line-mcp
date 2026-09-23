@@ -64,11 +64,22 @@ Muse (`~/.claude.json` or project `.mcp.json`):
 |---|---|
 | `line_whoami` | Logged-in profile (mid, display name) |
 | `line_chats(limit?)` | Recent chats: `chat_id`, resolved name, unread count |
-| `line_read(chat_id, count?)` | Recent messages, E2EE-decrypted, oldest first (images flagged with `has_image`) |
+| `line_get_chat(chat_id)` | Info about one chat: kind, unread count, last message |
+| `line_contact_chats(contact_id)` | Find the 1:1 chat with a contact |
+| `line_last_interaction(contact_id)` | Most recent message with a contact |
+| `line_read(chat_id, count?)` | Recent messages, E2EE-decrypted, oldest first (images flagged with `has_image`; stickers include package/sticker ids + preview URL) |
+| `line_message_context(chat_id, message_id, before?, after?)` | Messages surrounding a specific message |
+| `line_search_messages(query, per_chat?, chat_limit?)` | Full-text search over recent messages across chats |
 | `line_send(chat_id, text)` | Send a text message **as you** — only with explicit approval |
+| `line_send_file(chat_id, file_path)` | Send an image/video/document **as you** — only with explicit approval |
+| `line_send_voice(chat_id, audio_path, duration_ms?)` | Send a voice message **as you** — only with explicit approval |
+| `line_send_sticker(chat_id, package_id, sticker_id)` | Send a LINE sticker **as you** — only with explicit approval |
 | `line_get_image(message_id)` | Download an image message — returns the image itself |
-| `line_send_image(chat_id, image_path)` | Send an image file **as you** — only with explicit approval |
+| `line_download_media(message_id, save_dir?)` | Download any media to disk — returns the local path |
+| `line_unsend(message_id)` | Unsend one of your messages — only with explicit approval |
+| `line_mark_read(chat_id)` | Mark a chat as read |
 | `line_find_contact(name)` | Find contacts by name (mid doubles as DM `chat_id`) |
+| `line_groups()` | Groups: id + name |
 | `line_groups()` | Groups: id + name |
 
 ## Safety notes for agent builders
